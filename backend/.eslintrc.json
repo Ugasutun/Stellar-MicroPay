@@ -19,12 +19,7 @@
           "sibling",
           "index"
         ],
-        "pathGroups": [],
-        "newlines-between": "always",
-        "alphabeticalOrderOptions": {
-          "order": "asc",
-          "caseInsensitive": true
-        }
+        "newlines-between": "always"
       }
     ]
   }
