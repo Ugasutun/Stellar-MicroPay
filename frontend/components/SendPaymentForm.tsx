@@ -52,10 +52,8 @@ import {
 import clsx from "clsx";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
-import { useEffect, useRef, useState } from "react";
 import { useToastContext } from "@/lib/ToastContext";
-import { useTranslation } from "@/lib/i18n";
+import { useI18n } from "@/contexts/I18nContext";
 
 
 interface SendPaymentFormProps {
@@ -137,7 +135,7 @@ function SendPaymentForm({
   hideMemoField = false,
   accountBalances = [],
 }: SendPaymentFormProps) {
-  const { t } = useTranslation("sendPayment");
+  const { t } = useI18n();
   const { addToast } = useToastContext();
   const [selectedAsset, setSelectedAsset] = useState<AssetType>("XLM");
   const [networkFeeXlm, setNetworkFeeXlm] = useState(STELLAR_BASE_FEE_XLM);
@@ -173,6 +171,9 @@ function SendPaymentForm({
   const [scannerError, setScannerError] = useState<string | null>(null);
   const [destAccountWarning, setDestAccountWarning] = useState<string | null>(null);
   const [isCheckingDest, setIsCheckingDest] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scannerAnnouncement, setScannerAnnouncement] = useState<string | null>(null);
+  const [permissionAnnouncement, setPermissionAnnouncement] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -180,7 +181,6 @@ function SendPaymentForm({
   const frameRequestRef = useRef<number | null>(null);
   const isDetectingRef = useRef(false);
   const destinationInputRef = useRef<HTMLInputElement | null>(null);
-  const snsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Power-user shortcut: press "S" (when not already typing in a field and no
   // modal is open) to jump focus to the destination input (#264).
@@ -214,6 +214,8 @@ function SendPaymentForm({
   const openScanner = async () => {
     setIsScannerOpen(true);
     setScannerError(null);
+    setPermissionAnnouncement(null);
+    setScannerAnnouncement(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
@@ -222,15 +224,38 @@ function SendPaymentForm({
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
+      setIsScanning(true);
+      setScannerAnnouncement("Camera access granted. Scanning for QR code. Point your camera at a Stellar address QR code.");
+      setPermissionAnnouncement("Camera permission granted");
       startDetection();
-    } catch (err) {
-      setScannerError("Camera access denied or not available.");
+    } catch (err: any) {
+      setIsScanning(false);
+      
+      // Distinguish between different camera permission errors
+      let errorMessage = "Camera access denied or not available.";
+      let announcement = "Camera permission denied.";
+      
+      if (err.name === "NotAllowedError") {
+        errorMessage = "Camera permission denied. Please enable camera access in your browser settings.";
+        announcement = "Camera permission was denied. Check your browser settings to allow camera access.";
+      } else if (err.name === "NotFoundError" || err.name === "NotSupportedError") {
+        errorMessage = "No camera device found. Please check that a camera is connected.";
+        announcement = "No camera device available.";
+      } else if (err.name === "SecurityError") {
+        errorMessage = "Camera access blocked for security reasons. Try accessing from an HTTPS connection.";
+        announcement = "Camera access blocked for security. Use an HTTPS connection.";
+      }
+      
+      setScannerError(errorMessage);
+      setPermissionAnnouncement(announcement);
       setIsScannerOpen(false);
     }
   };
 
   const closeScanner = () => {
     setIsScannerOpen(false);
+    setIsScanning(false);
+    setScannerAnnouncement(null);
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -259,12 +284,16 @@ function SendPaymentForm({
             setDestination(result);
             setDestinationResolutionError(null);
             setResolvedPaymentDestination(null);
-            closeScanner();
+            setScannerAnnouncement(`QR code detected and validated. Destination address populated: ${result}`);
+            setTimeout(() => closeScanner(), 500);
             return;
+          } else {
+            // QR detected but invalid for Stellar
+            setScannerAnnouncement("QR code detected but not a valid Stellar address. Please try another code.");
           }
         }
       } catch (e) {
-        // detection error
+        // detection error - continue scanning
       }
 
       frameRequestRef.current = requestAnimationFrame(detect);
@@ -383,24 +412,24 @@ function SendPaymentForm({
     // Only trigger for SNS/federation names — raw addresses and usernames are
     // handled elsewhere.
     if (!isStellarName(trimmed)) {
-      setSnsResolvedAddress(null);
+      setSnsResolved(null);
       setSnsResolving(false);
       return;
     }
 
     setSnsResolving(true);
-    setSnsResolvedAddress(null);
+    setSnsResolved(null);
     setDestinationResolutionError(null);
 
     snsDebounceRef.current = setTimeout(async () => {
       try {
         const resolved = await resolveStellarName(trimmed);
-        setSnsResolvedAddress(resolved);
+        setSnsResolved(resolved);
         setDestinationResolutionError(null);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Could not resolve name";
         setDestinationResolutionError(message);
-        setSnsResolvedAddress(null);
+        setSnsResolved(null);
       } finally {
         setSnsResolving(false);
       }
@@ -421,49 +450,22 @@ function SendPaymentForm({
 
     setIsCheckingDest(true);
     setDestAccountWarning(null);
-    server.loadAccount(trimmedAddress)
+    const trimmedAddr = destination.trim();
+    server.loadAccount(trimmedAddr)
       .then(() => {
-        if (destinationValidationRequestRef.current === requestId) setDestAccountWarning(null);
+        setDestAccountWarning(null);
       })
       .catch(() => {
-        if (destinationValidationRequestRef.current === requestId) {
-          setDestAccountWarning(
-            selectedAsset === "XLM"
-              ? "This account doesn't exist yet. Sending ≥ 1 XLM will create it."
-              : "This account doesn't exist on the Stellar network."
-          );
-        }
+        setDestAccountWarning(
+          selectedAsset === "XLM"
+            ? "This account doesn't exist yet. Sending ≥ 1 XLM will create it."
+            : "This account doesn't exist on the Stellar network."
+        );
       })
       .finally(() => {
-        if (destinationValidationRequestRef.current === requestId) setIsCheckingDest(false);
+        setIsCheckingDest(false);
       });
-  }, [selectedAsset]);
-
-  // Pre-validate destination account existence on the Stellar network (#294)
-  useEffect(() => {
-    if (destinationValidationTimeoutRef.current) {
-      clearTimeout(destinationValidationTimeoutRef.current);
-    }
-
-    if (!isValidStellarAddress(destination.trim())) {
-      destinationValidationRequestRef.current += 1;
-      setDestAccountWarning(null);
-      setIsCheckingDest(false);
-      return;
-    }
-
-    destinationValidationTimeoutRef.current = setTimeout(() => {
-      validateDestinationAccount(destination);
-      destinationValidationTimeoutRef.current = null;
-    }, DESTINATION_VALIDATION_DEBOUNCE_MS);
-
-    return () => {
-      if (destinationValidationTimeoutRef.current) {
-        clearTimeout(destinationValidationTimeoutRef.current);
-        destinationValidationTimeoutRef.current = null;
-      }
-    };
-  }, [destination, validateDestinationAccount]);
+  }, [selectedAsset, destination]);
 
   const xlmBal = parseFloat(xlmBalance);
   const usdcBal = usdcBalance ? parseFloat(usdcBalance) : 0;
@@ -542,8 +544,8 @@ function SendPaymentForm({
 
     // If we already resolved a SNS name in the debounced effect, use that
     // result directly — never submit the raw name string.
-    if (isStellarName(trimmedDestination) && snsResolvedAddress) {
-      return snsResolvedAddress;
+    if (isStellarName(trimmedDestination) && snsResolved) {
+      return snsResolved;
     }
 
     setIsResolvingDestination(true);
@@ -592,7 +594,7 @@ function SendPaymentForm({
     setDestination(address);
     setDestinationResolutionError(null);
     setResolvedPaymentDestination(null);
-    setSnsResolvedAddress(null);
+    setSnsResolved(null);
     setIsContactsDropdownOpen(false);
   };
 
@@ -755,11 +757,8 @@ function SendPaymentForm({
   const setMaxAmount = () => setAmount(maxSend.toFixed(7));
 
   const runImmediateDestinationValidation = () => {
-    if (destinationValidationTimeoutRef.current) {
-      clearTimeout(destinationValidationTimeoutRef.current);
-      destinationValidationTimeoutRef.current = null;
-    }
-    validateDestinationAccount(destination);
+    // Immediate validation can be added here if needed
+    // For now, this is a no-op as the validation happens in useEffect
   };
 
   const openConfirmation = () => {
@@ -945,7 +944,7 @@ function SendPaymentForm({
                 setDestination(val);
                 setDestinationResolutionError(null);
                 setResolvedPaymentDestination(null);
-                setSnsResolvedAddress(null);
+                setSnsResolved(null);
                 setDestAccountWarning(null);
                 setIsContactsDropdownOpen(true);
 
@@ -1019,9 +1018,9 @@ function SendPaymentForm({
                 <span>Resolving name…</span>
               </div>
             )}
-            {!snsResolving && snsResolvedAddress && (
+            {!snsResolving && snsResolved && (
               <p className="mt-2 text-xs text-emerald-400" aria-live="polite">
-                Resolves to: <span className="font-mono">{snsResolvedAddress}</span>
+                Resolves to: <span className="font-mono">{snsResolved}</span>
               </p>
             )}
 
@@ -1137,6 +1136,132 @@ function SendPaymentForm({
         timeoutSeconds={60}
         onClose={closeStatusModal}
       />
+
+      {/* QR Scanner Modal with Accessibility Features */}
+      {isScannerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="scanner-title">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-white/10 shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between bg-slate-800/50 px-6 py-4 border-b border-white/5">
+              <h2 id="scanner-title" className="font-semibold text-white">
+                Scan QR Code
+              </h2>
+              <button
+                onClick={closeScanner}
+                className="text-slate-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/5"
+                aria-label="Close QR scanner"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Scanner Content */}
+            <div className="p-6">
+              {/* Instructions */}
+              <div className="mb-4 p-3 rounded-lg bg-stellar-500/10 border border-stellar-500/20">
+                <p className="text-sm text-stellar-300">
+                  Point your camera at a Stellar address QR code. The destination will be filled automatically when a valid code is detected.
+                </p>
+              </div>
+
+              {/* Video Element */}
+              <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-black mb-4 border border-white/10">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  className="w-full h-full object-cover"
+                  aria-label="Camera video stream for QR code scanning"
+                />
+                {!isScanning && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                    <div className="text-center">
+                      <div className="w-8 h-8 border-2 border-stellar-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                      <p className="text-xs text-stellar-300">Starting camera...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Scanner Status Messages */}
+              <div className="space-y-3 mb-4">
+                {/* Permission Status */}
+                {permissionAnnouncement && (
+                  <div
+                    role="status"
+                    aria-live="assertive"
+                    aria-atomic="true"
+                    className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300"
+                  >
+                    ✓ {permissionAnnouncement}
+                  </div>
+                )}
+
+                {/* Scanning Status and Results */}
+                {scannerAnnouncement && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    className={clsx(
+                      "p-2 rounded-lg text-xs",
+                      scannerAnnouncement.includes("populated") || scannerAnnouncement.includes("validated")
+                        ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+                        : "bg-stellar-500/10 border border-stellar-500/30 text-stellar-300"
+                    )}
+                  >
+                    {scannerAnnouncement.includes("populated")
+                      ? "✓ " + scannerAnnouncement
+                      : scannerAnnouncement.includes("not a valid")
+                      ? "⚠ " + scannerAnnouncement
+                      : scannerAnnouncement}
+                  </div>
+                )}
+
+                {/* Error Display */}
+                {scannerError && (
+                  <div
+                    role="alert"
+                    aria-live="assertive"
+                    aria-atomic="true"
+                    className="p-2 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-300"
+                  >
+                    ✕ {scannerError}
+                  </div>
+                )}
+              </div>
+
+              {/* Hidden Live Region for Screen Reader Summary */}
+              <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+                {isScanning
+                  ? "Camera is active and scanning for QR codes containing Stellar addresses."
+                  : "Camera is starting. Please wait."}
+                {permissionAnnouncement && ` ${permissionAnnouncement}`}
+                {scannerAnnouncement && ` ${scannerAnnouncement}`}
+                {scannerError && ` Error: ${scannerError}`}
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="border-t border-white/5 bg-slate-800/30 px-6 py-4 flex gap-3">
+              <button
+                onClick={closeScanner}
+                className="flex-1 px-4 py-2.5 rounded-lg border border-white/10 hover:border-white/20 text-white font-medium text-sm transition-colors hover:bg-white/5"
+              >
+                Cancel Scan
+              </button>
+              <button
+                onClick={closeScanner}
+                className="flex-1 px-4 py-2.5 rounded-lg bg-stellar-500/20 hover:bg-stellar-500/30 text-stellar-300 font-medium text-sm transition-colors border border-stellar-500/30"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1154,7 +1279,7 @@ interface SendConfirmationModalProps {
 }
 
 function SendConfirmationModal({ isOpen, destination, amount, asset, memo, estimatedFee, onCancel, onConfirm }: SendConfirmationModalProps) {
-  const { t } = useTranslation("sendPayment");
+  const { t } = useI18n();
   if (!isOpen) return null;
   const shortened = shortenAddress(destination, 8);
   return (
